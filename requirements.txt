@@ -1,0 +1,26 @@
+# Notebook/data utilities
+numpy
+pandas
+tqdm
+ipykernel
+jupyterlab
+
+# Probing
+scikit-learn
+scipy
+joblib
+matplotlib
+seaborn
+
+# Feature extraction
+# MedGemma/Gemma 3 support starts at transformers 4.50.0.
+transformers>=4.50.0
+accelerate
+huggingface-hub
+safetensors
+sentencepiece
+protobuf
+pillow
+h5py
+torch
+torchvision
