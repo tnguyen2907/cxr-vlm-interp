@@ -19,6 +19,9 @@ dependencies:
   - pip:
       - "transformers>=4.50.0"
       - accelerate
+      - datasets
+      - peft
+      - trl
       - huggingface-hub
       - safetensors
       - sentencepiece

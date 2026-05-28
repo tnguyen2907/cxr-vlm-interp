@@ -16,6 +16,9 @@ seaborn
 # MedGemma/Gemma 3 support starts at transformers 4.50.0.
 transformers>=4.50.0
 accelerate
+datasets
+peft
+trl
 huggingface-hub
 safetensors
 sentencepiece
