@@ -1,0 +1,269 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.3 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated as
+% required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+\datalist[entry]{nyt/global//global/global/global}
+  \entry{chambon2024chexpertplus}{article}{}{}
+    \true{moreauthor}
+    \true{morelabelname}
+    \name{author}{1}{}{%
+      {{hash=CP}{%
+         family={Chambon},
+         familyi={C\bibinitperiod},
+         given={Pierre},
+         giveni={P\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{CP+1}
+    \strng{fullhash}{CP+1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{labelalpha}{Cha+24}
+    \field{sortinit}{C}
+    \field{sortinithash}{C}
+    \field{title}{CheXpert Plus: Augmenting a Large Chest X-ray Dataset with
+  Text Radiology Reports, Patient Demographics and Additional Image Formats}
+    \field{journaltitle}{arXiv preprint arXiv:2405.19538}
+    \field{year}{2024}
+  \endentry
+
+  \entry{gemma32025}{article}{}{}
+    \name{author}{1}{}{%
+      {{hash=G}{%
+         family={{Gemma Team}},
+         familyi={G\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{G1}
+    \strng{fullhash}{G1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{labelalpha}{{Gem}25}
+    \field{sortinit}{G}
+    \field{sortinithash}{G}
+    \field{title}{Gemma 3 Technical Report}
+    \field{journaltitle}{arXiv preprint arXiv:2503.19786}
+    \field{year}{2025}
+  \endentry
+
+  \entry{geva2023dissecting}{inproceedings}{}{}
+    \name{author}{4}{}{%
+      {{hash=GM}{%
+         family={Geva},
+         familyi={G\bibinitperiod},
+         given={Mor},
+         giveni={M\bibinitperiod},
+      }}%
+      {{hash=BJ}{%
+         family={Bastings},
+         familyi={B\bibinitperiod},
+         given={Jasmijn},
+         giveni={J\bibinitperiod},
+      }}%
+      {{hash=FK}{%
+         family={Filippova},
+         familyi={F\bibinitperiod},
+         given={Katja},
+         giveni={K\bibinitperiod},
+      }}%
+      {{hash=GA}{%
+         family={Globerson},
+         familyi={G\bibinitperiod},
+         given={Amir},
+         giveni={A\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{GM+1}
+    \strng{fullhash}{GMBJFKGA1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{labelalpha}{Gev+23}
+    \field{sortinit}{G}
+    \field{sortinithash}{G}
+    \field{booktitle}{Proceedings of the 2023 Conference on Empirical Methods
+  in Natural Language Processing}
+    \verb{doi}
+    \verb 10.48550/arXiv.2304.14767
+    \endverb
+    \field{title}{Dissecting Recall of Factual Associations in Auto-Regressive
+  Language Models}
+    \verb{url}
+    \verb https://arxiv.org/abs/2304.14767
+    \endverb
+    \field{year}{2023}
+  \endentry
+
+  \entry{medgemma2025}{article}{}{}
+    \name{author}{1}{}{%
+      {{hash=G}{%
+         family={{Google DeepMind}},
+         familyi={G\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{G2}
+    \strng{fullhash}{G2}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{labelalpha}{{Goo}25}
+    \field{sortinit}{G}
+    \field{sortinithash}{G}
+    \field{title}{MedGemma Technical Report}
+    \field{journaltitle}{arXiv preprint arXiv:2507.05201}
+    \field{year}{2025}
+  \endentry
+
+  \entry{irvin2019chexpert}{inproceedings}{}{}
+    \name{author}{20}{}{%
+      {{hash=IJ}{%
+         family={Irvin},
+         familyi={I\bibinitperiod},
+         given={Jeremy},
+         giveni={J\bibinitperiod},
+      }}%
+      {{hash=RP}{%
+         family={Rajpurkar},
+         familyi={R\bibinitperiod},
+         given={Pranav},
+         giveni={P\bibinitperiod},
+      }}%
+      {{hash=KM}{%
+         family={Ko},
+         familyi={K\bibinitperiod},
+         given={Michael},
+         giveni={M\bibinitperiod},
+      }}%
+      {{hash=YY}{%
+         family={Yu},
+         familyi={Y\bibinitperiod},
+         given={Yifan},
+         giveni={Y\bibinitperiod},
+      }}%
+      {{hash=CIS}{%
+         family={Ciurea-Ilcus},
+         familyi={C\bibinithyphendelim I\bibinitperiod},
+         given={Silviana},
+         giveni={S\bibinitperiod},
+      }}%
+      {{hash=CC}{%
+         family={Chute},
+         familyi={C\bibinitperiod},
+         given={Chris},
+         giveni={C\bibinitperiod},
+      }}%
+      {{hash=MH}{%
+         family={Marklund},
+         familyi={M\bibinitperiod},
+         given={Henrik},
+         giveni={H\bibinitperiod},
+      }}%
+      {{hash=HB}{%
+         family={Haghgoo},
+         familyi={H\bibinitperiod},
+         given={Behzad},
+         giveni={B\bibinitperiod},
+      }}%
+      {{hash=BR}{%
+         family={Ball},
+         familyi={B\bibinitperiod},
+         given={Robyn},
+         giveni={R\bibinitperiod},
+      }}%
+      {{hash=SK}{%
+         family={Shpanskaya},
+         familyi={S\bibinitperiod},
+         given={Katie},
+         giveni={K\bibinitperiod},
+      }}%
+      {{hash=SJ}{%
+         family={Seekins},
+         familyi={S\bibinitperiod},
+         given={Jayne},
+         giveni={J\bibinitperiod},
+      }}%
+      {{hash=MDA}{%
+         family={Mong},
+         familyi={M\bibinitperiod},
+         given={David\bibnamedelima A.},
+         giveni={D\bibinitperiod\bibinitdelim A\bibinitperiod},
+      }}%
+      {{hash=HSS}{%
+         family={Halabi},
+         familyi={H\bibinitperiod},
+         given={Safwan\bibnamedelima S.},
+         giveni={S\bibinitperiod\bibinitdelim S\bibinitperiod},
+      }}%
+      {{hash=SJK}{%
+         family={Sandberg},
+         familyi={S\bibinitperiod},
+         given={Jesse\bibnamedelima K.},
+         giveni={J\bibinitperiod\bibinitdelim K\bibinitperiod},
+      }}%
+      {{hash=JR}{%
+         family={Jones},
+         familyi={J\bibinitperiod},
+         given={Ricky},
+         giveni={R\bibinitperiod},
+      }}%
+      {{hash=LDB}{%
+         family={Larson},
+         familyi={L\bibinitperiod},
+         given={David\bibnamedelima B.},
+         giveni={D\bibinitperiod\bibinitdelim B\bibinitperiod},
+      }}%
+      {{hash=LCP}{%
+         family={Langlotz},
+         familyi={L\bibinitperiod},
+         given={Curtis\bibnamedelima P.},
+         giveni={C\bibinitperiod\bibinitdelim P\bibinitperiod},
+      }}%
+      {{hash=PBN}{%
+         family={Patel},
+         familyi={P\bibinitperiod},
+         given={Bhavik\bibnamedelima N.},
+         giveni={B\bibinitperiod\bibinitdelim N\bibinitperiod},
+      }}%
+      {{hash=LMP}{%
+         family={Lungren},
+         familyi={L\bibinitperiod},
+         given={Matthew\bibnamedelima P.},
+         giveni={M\bibinitperiod\bibinitdelim P\bibinitperiod},
+      }}%
+      {{hash=NAY}{%
+         family={Ng},
+         familyi={N\bibinitperiod},
+         given={Andrew\bibnamedelima Y.},
+         giveni={A\bibinitperiod\bibinitdelim Y\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{IJ+1}
+    \strng{fullhash}{IJRPKMYYCISCCMHHBBRSKSJMDAHSSSJKJRLDBLCPPBNLMPNAY1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{labelalpha}{Irv+19}
+    \field{sortinit}{I}
+    \field{sortinithash}{I}
+    \field{booktitle}{Proceedings of the AAAI Conference on Artificial
+  Intelligence}
+    \verb{doi}
+    \verb 10.1609/aaai.v33i01.3301590
+    \endverb
+    \field{title}{CheXpert: A Large Chest Radiograph Dataset with Uncertainty
+  Labels and Expert Comparison}
+    \field{year}{2019}
+  \endentry
+\enddatalist
+\endinput
