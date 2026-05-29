@@ -1,0 +1,31 @@
+name: cxr-vlm-interp
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pandas
+  - tqdm
+  - ipykernel
+  - jupyterlab
+  - scikit-learn
+  - scipy
+  - joblib
+  - matplotlib
+  - seaborn
+  - pillow
+  - h5py
+  - pip:
+      - "transformers>=4.50.0"
+      - accelerate
+      - datasets
+      - peft
+      - trl
+      - huggingface-hub
+      - safetensors
+      - sentencepiece
+      - protobuf
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+      - torch==2.11.0+cu126
+      - torchvision==0.26.0+cu126
