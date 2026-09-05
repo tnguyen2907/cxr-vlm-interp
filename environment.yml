@@ -12,6 +12,7 @@ dependencies:
   - scikit-learn
   - scipy
   - joblib
+  - psutil
   - matplotlib
   - seaborn
   - pillow

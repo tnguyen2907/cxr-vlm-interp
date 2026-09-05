@@ -179,7 +179,7 @@ The evaluation metric is AUROC, matching the MedGemma report's MedSigLIP linear-
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=\textwidth]{../artifacts/plots/mean_auroc_over_layers.png}
+    \includegraphics[width=\textwidth]{../runs/2026-09-05_imported_artifacts/plots/mean_auroc_over_layers.png}
     \caption{
     Mean AUROC across the five CheXpert+ findings, ordered from earlier to later representation stages.
     Solid curves show layerwise probes, the dashed horizontal line shows the standalone MedSigLIP baseline, and the diamond marker shows direct yes/no log-probability classification.
@@ -194,7 +194,7 @@ The evaluation metric is AUROC, matching the MedGemma report's MedSigLIP linear-
     Bold indicates the best AUROC.
     }
     \label{tab:mean-results}
-    \resizebox{\textwidth}{!}{\input{../artifacts/tables/representation_mean.tex}}
+    \resizebox{\textwidth}{!}{\input{../runs/2026-09-05_imported_artifacts/tables/representation_mean.tex}}
 \end{table}
 
 \paragraph{Pre-decoder representations are strongest.}
@@ -260,7 +260,7 @@ The following figures and tables show the results for each finding.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=\textwidth]{../artifacts/plots/atelectasis_auroc_over_layers.png}
+    \includegraphics[width=\textwidth]{../runs/2026-09-05_imported_artifacts/plots/atelectasis_auroc_over_layers.png}
     \caption{AUROC over representation stage for atelectasis, a finding describing partial lung collapse or under-expansion.}
     \label{fig:atelectasis}
 \end{figure}
@@ -268,7 +268,7 @@ The following figures and tables show the results for each finding.
 \begin{table}[!htbp]
     \centering
     \caption{Probe performance for atelectasis. Bold indicates the best AUROC.}
-    \resizebox{\textwidth}{!}{\input{../artifacts/tables/representation_atelectasis.tex}}
+    \resizebox{\textwidth}{!}{\input{../runs/2026-09-05_imported_artifacts/tables/representation_atelectasis.tex}}
 \end{table}
 
 \clearpage
@@ -276,7 +276,7 @@ The following figures and tables show the results for each finding.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=\textwidth]{../artifacts/plots/cardiomegaly_auroc_over_layers.png}
+    \includegraphics[width=\textwidth]{../runs/2026-09-05_imported_artifacts/plots/cardiomegaly_auroc_over_layers.png}
     \caption{AUROC over representation stage for cardiomegaly, a finding describing enlargement of the cardiac silhouette.}
     \label{fig:cardiomegaly}
 \end{figure}
@@ -284,7 +284,7 @@ The following figures and tables show the results for each finding.
 \begin{table}[!htbp]
     \centering
     \caption{Probe performance for cardiomegaly. Bold indicates the best AUROC.}
-    \resizebox{\textwidth}{!}{\input{../artifacts/tables/representation_cardiomegaly.tex}}
+    \resizebox{\textwidth}{!}{\input{../runs/2026-09-05_imported_artifacts/tables/representation_cardiomegaly.tex}}
 \end{table}
 
 \clearpage
@@ -292,7 +292,7 @@ The following figures and tables show the results for each finding.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=\textwidth]{../artifacts/plots/consolidation_auroc_over_layers.png}
+    \includegraphics[width=\textwidth]{../runs/2026-09-05_imported_artifacts/plots/consolidation_auroc_over_layers.png}
     \caption{AUROC over representation stage for consolidation, an airspace opacity pattern that can reflect alveolar filling.}
     \label{fig:consolidation}
 \end{figure}
@@ -300,7 +300,7 @@ The following figures and tables show the results for each finding.
 \begin{table}[!htbp]
     \centering
     \caption{Probe performance for consolidation. Bold indicates the best AUROC.}
-    \resizebox{\textwidth}{!}{\input{../artifacts/tables/representation_consolidation.tex}}
+    \resizebox{\textwidth}{!}{\input{../runs/2026-09-05_imported_artifacts/tables/representation_consolidation.tex}}
 \end{table}
 
 \clearpage
@@ -308,7 +308,7 @@ The following figures and tables show the results for each finding.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=\textwidth]{../artifacts/plots/edema_auroc_over_layers.png}
+    \includegraphics[width=\textwidth]{../runs/2026-09-05_imported_artifacts/plots/edema_auroc_over_layers.png}
     \caption{AUROC over representation stage for edema, a finding describing excess fluid in the lungs.}
     \label{fig:edema}
 \end{figure}
@@ -316,7 +316,7 @@ The following figures and tables show the results for each finding.
 \begin{table}[!htbp]
     \centering
     \caption{Probe performance for edema. Bold indicates the best AUROC.}
-    \resizebox{\textwidth}{!}{\input{../artifacts/tables/representation_edema.tex}}
+    \resizebox{\textwidth}{!}{\input{../runs/2026-09-05_imported_artifacts/tables/representation_edema.tex}}
 \end{table}
 
 \clearpage
@@ -324,7 +324,7 @@ The following figures and tables show the results for each finding.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=\textwidth]{../artifacts/plots/pleural_effusion_auroc_over_layers.png}
+    \includegraphics[width=\textwidth]{../runs/2026-09-05_imported_artifacts/plots/pleural_effusion_auroc_over_layers.png}
     \caption{AUROC over representation stage for pleural effusion, a finding describing fluid in the pleural space around the lung.}
     \label{fig:pleural-effusion}
 \end{figure}
@@ -332,7 +332,7 @@ The following figures and tables show the results for each finding.
 \begin{table}[!htbp]
     \centering
     \caption{Probe performance for pleural effusion. Bold indicates the best AUROC.}
-    \resizebox{\textwidth}{!}{\input{../artifacts/tables/representation_pleural_effusion.tex}}
+    \resizebox{\textwidth}{!}{\input{../runs/2026-09-05_imported_artifacts/tables/representation_pleural_effusion.tex}}
 \end{table}
 
 \end{document}

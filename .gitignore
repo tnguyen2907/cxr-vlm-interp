@@ -1,5 +1,16 @@
+# Personal coding-agent context
 AGENTS.md
+CLAUDE.md
 PLAN.md
+docs/
+.claude/
+.codex/
 
-artifacts
-temp*
+# Experiment outputs and temporary caches
+artifacts/
+/runs/
+temp*/
+
+# Python runtime caches
+__pycache__/
+*.pyc
