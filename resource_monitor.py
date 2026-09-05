@@ -78,6 +78,8 @@ class Measure:
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()
             self.gpu_uuid = str(getattr(torch.cuda.get_device_properties(0), "uuid", "")) or None
+            if self.gpu_uuid and not self.gpu_uuid.startswith(("GPU-", "MIG-")):
+                self.gpu_uuid = "GPU-" + self.gpu_uuid
         self.sample()
         self.cpu_before = sum(self.cpu_seconds.values())
         self.start = perf_counter()
