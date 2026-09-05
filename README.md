@@ -263,9 +263,9 @@ python lora_sft.py --output-root runs/sft_new_01
 
 Data preparation now takes `--output-root` instead of `--output`, saving the
 manifest in that run's `processed_data/`. It does not switch the default input
-manifest away from the imported snapshot. SFT retains the
-notebook settings: rank 16, alpha 32, dropout 0.05, decoder projection targets,
-batch 32, accumulation 2, one epoch, learning rate `5e-5`, and cosine schedule.
+manifest away from the imported snapshot. SFT uses the selected
+settings: rank 16, alpha 32, dropout 0.05, decoder projection targets,
+batch 32, accumulation 2, one epoch, learning rate `1e-4`, and cosine schedule.
 It caches processed CPU pixels once for both orders and supervises only the
 single yes/no answer token using full-vocabulary cross-entropy. Adapter files
 and training logs are saved in the new run's `lora_sft/` folder. Existing adapters
