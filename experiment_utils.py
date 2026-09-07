@@ -5,6 +5,7 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 import os
 import sys
+from time import perf_counter
 import traceback
 from types import MethodType
 
@@ -89,12 +90,15 @@ def load_rgb(path):
         return image.convert("RGB")
 
 
-def image_batches(paths, batch_size=IMAGE_PROCESS_BATCH_SIZE, workers=IMAGE_LOAD_NUM_WORKERS):
+def image_batches(paths, batch_size=IMAGE_PROCESS_BATCH_SIZE, workers=IMAGE_LOAD_NUM_WORKERS, timings=None):
     # Submit only one batch, not all paths: completed futures can also retain images.
     paths = list(paths)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for start in tqdm(range(0, len(paths), batch_size), desc="Prepare images"):
+            tick = perf_counter()
             images = list(pool.map(load_rgb, paths[start:start + batch_size]))
+            if timings is not None:
+                timings["image_load_sec"] = timings.get("image_load_sec", 0) + perf_counter() - tick
             try:
                 yield start, images
             finally:

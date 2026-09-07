@@ -1,7 +1,9 @@
 """Shared linear/MHA extraction and training on original MedGemma representations."""
 
 import argparse
-from contextlib import ExitStack
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, ExitStack
 import gc
 from pathlib import Path
 import pickle
@@ -29,6 +31,7 @@ from transformers.models.siglip.modeling_siglip import SiglipMultiheadAttentionP
 from resource_monitor import Measure, resource_snapshot
 from experiment_utils import (
     ACTIVATION_ROOT, DATA_CSV, MEDGEMMA_MODEL_ID, MEDSIGLIP_MODEL_ID, MODEL_DTYPE,
+    IMAGE_LOAD_NUM_WORKERS, IMAGE_PROCESS_BATCH_SIZE,
     IMPORTED_RUN_ROOT, PROMPT_ORDERS, RANDOM_STATE, TARGET_LABELS, answer_token_ids,
     cached_image_forward, configure_runtime, image_batches, image_token_id,
     resolve_path, run_log, tokenize_prompts,
@@ -99,7 +102,52 @@ def extract_image_features(model, pixels):
         hook.remove()
 
 
-def prepare_visual_features(paths, medgemma, processor, include_medsiglip=True):
+def processed_image_batches(paths, processor, sig_processor=None, workers=IMAGE_LOAD_NUM_WORKERS,
+                            prefetch_batches=0, timings=None):
+    """One CPU processor; at most prefetch_batches pending batches plus the consumer's batch."""
+    count = (len(paths) + IMAGE_PROCESS_BATCH_SIZE - 1) // IMAGE_PROCESS_BATCH_SIZE
+    with closing(image_batches(paths, batch_size=IMAGE_PROCESS_BATCH_SIZE, workers=workers, timings=timings)) as source:
+        def prepare_batch():
+            start, images = next(source)
+            try:
+                tick = perf_counter()
+                pixels = processor.image_processor(
+                    images=images, return_tensors="pt", do_pan_and_scan=False,
+                )["pixel_values"]
+                if timings is not None:
+                    timings["medgemma_processor_sec"] = timings.get("medgemma_processor_sec", 0) + perf_counter() - tick
+                sig_pixels = None
+                if sig_processor is not None:
+                    tick = perf_counter()
+                    sig_pixels = sig_processor(images=images, return_tensors="pt")["pixel_values"]
+                    if timings is not None:
+                        timings["medsiglip_processor_sec"] = timings.get("medsiglip_processor_sec", 0) + perf_counter() - tick
+                return start, pixels, sig_pixels
+            finally:
+                for image in images:
+                    image.close()
+                images.clear()
+
+        if not prefetch_batches:
+            for _ in range(count):
+                yield prepare_batch()
+        else:
+            # Only this worker advances the image iterator or calls the CPU processors.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                submitted = min(prefetch_batches, count)
+                pending = deque(pool.submit(prepare_batch) for _ in range(submitted))
+                while pending:
+                    batch = pending.popleft().result()
+                    if submitted < count:
+                        pending.append(pool.submit(prepare_batch))
+                        submitted += 1
+                    yield batch
+                    del batch
+        next(source, None)  # Finish the image iterator and its progress bar after the last batch.
+
+
+def prepare_visual_features(paths, medgemma, processor, include_medsiglip=True,
+                            workers=IMAGE_LOAD_NUM_WORKERS, prefetch_batches=0, timings=None):
     """Bounded raw images; retain projected tokens, never a full raw/pixel cache."""
     device = next(medgemma.parameters()).device
     config = medgemma.config
@@ -107,6 +155,7 @@ def prepare_visual_features(paths, medgemma, processor, include_medsiglip=True):
     projected = torch.empty((n, tokens, dim), dtype=MODEL_DTYPE)
     preprojector = np.empty((n, config.vision_config.hidden_size), dtype=np.float32)
     sig_features = None
+    sig_processor = None
     if include_medsiglip:
         sig_processor = AutoProcessor.from_pretrained(MEDSIGLIP_MODEL_ID)
         sig_model = AutoModel.from_pretrained(MEDSIGLIP_MODEL_ID, dtype=MODEL_DTYPE).to(device).eval()
@@ -114,30 +163,43 @@ def prepare_visual_features(paths, medgemma, processor, include_medsiglip=True):
         sig_buffer = torch.empty((MEDSIGLIP_BATCH_SIZE, 3, 448, 448), dtype=MODEL_DTYPE)
         sig_count = sig_start = 0
 
-    for start, images in image_batches(paths):
-        end = start + len(images)
-        pixels = processor.image_processor(images=images, return_tensors="pt", do_pan_and_scan=False)["pixel_values"]
-        features, pre = extract_image_features(medgemma, pixels.to(device, dtype=MODEL_DTYPE))
-        projected[start:end].copy_(features)
-        preprojector[start:end] = pre.cpu().numpy()
-        del pixels, features, pre
-        if include_medsiglip:
-            sig_pixels = sig_processor(images=images, return_tensors="pt")["pixel_values"]
-            offset = 0
-            while offset < len(images):
-                count = min(MEDSIGLIP_BATCH_SIZE - sig_count, len(images) - offset)
-                sig_buffer[sig_count:sig_count + count].copy_(sig_pixels[offset:offset + count])
-                sig_count += count
-                offset += count
-                if sig_count == MEDSIGLIP_BATCH_SIZE or (end == n and offset == len(images)):
-                    with torch.inference_mode():
-                        out = sig_model.get_image_features(pixel_values=sig_buffer[:sig_count].to(device))
-                        embedding = out.pooler_output if hasattr(out, "pooler_output") else out
-                        embedding = embedding / embedding.norm(p=2, dim=-1, keepdim=True)
-                    sig_features[sig_start:sig_start + sig_count] = embedding.float().cpu().numpy()
-                    sig_start += sig_count
-                    sig_count = 0
+    with closing(processed_image_batches(paths, processor, sig_processor, workers, prefetch_batches, timings)) as batches:
+        tick = perf_counter()
+        for start, pixels, sig_pixels in batches:
+            if timings is not None:
+                timings["input_wait_sec"] = timings.get("input_wait_sec", 0) + perf_counter() - tick
+            batch_size = len(pixels)
+            end = start + batch_size
+            tick = perf_counter()
+            features, pre = extract_image_features(medgemma, pixels.to(device, dtype=MODEL_DTYPE))
+            projected[start:end].copy_(features)
+            preprojector[start:end] = pre.cpu().numpy()
+            if timings is not None:
+                timings["medgemma_gpu_pipeline_sec"] = timings.get("medgemma_gpu_pipeline_sec", 0) + perf_counter() - tick
+            del pixels, features, pre
+            if include_medsiglip:
+                offset = 0
+                while offset < batch_size:
+                    count = min(MEDSIGLIP_BATCH_SIZE - sig_count, batch_size - offset)
+                    tick = perf_counter()
+                    sig_buffer[sig_count:sig_count + count].copy_(sig_pixels[offset:offset + count])
+                    if timings is not None:
+                        timings["medsiglip_cpu_staging_sec"] = timings.get("medsiglip_cpu_staging_sec", 0) + perf_counter() - tick
+                    sig_count += count
+                    offset += count
+                    if sig_count == MEDSIGLIP_BATCH_SIZE or (end == n and offset == batch_size):
+                        tick = perf_counter()
+                        with torch.inference_mode():
+                            out = sig_model.get_image_features(pixel_values=sig_buffer[:sig_count].to(device))
+                            embedding = out.pooler_output if hasattr(out, "pooler_output") else out
+                            embedding = embedding / embedding.norm(p=2, dim=-1, keepdim=True)
+                        sig_features[sig_start:sig_start + sig_count] = embedding.float().cpu().numpy()
+                        if timings is not None:
+                            timings["medsiglip_gpu_pipeline_sec"] = timings.get("medsiglip_gpu_pipeline_sec", 0) + perf_counter() - tick
+                        sig_start += sig_count
+                        sig_count = 0
             del sig_pixels
+            tick = perf_counter()
     return projected, preprojector, sig_features
 
 

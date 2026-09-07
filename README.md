@@ -120,11 +120,25 @@ checks hidden states/logits and unchanged vision features; it does not train
 probes or measure classification accuracy.
 
 Other comparisons are optional, not a required sweep. `--stage preprocess`
-compares one versus four loading workers on 2,048 images. `--stage linear`
-compares processes versus threads. Prioritize the cache stage before committing
+compares the full MedGemma/MedSigLIP visual preparation on 2,048 images: one
+loader, four loaders, and four loaders with up to two processed batches
+prefetched by one CPU processing worker. It reports component times and checks
+exact feature hashes across all three cases. GPU-pipeline times include
+transfers and host dispatch; overlapping component times should not be summed.
+Production prefetch remains off until the server comparison justifies it.
+`--stage linear` compares processes versus threads on all 102 layerwise fits
+(three pooled representations times 34 layers), using four workers and four
+inner threads. It does not cache any full image-token layers. Both backends
+use the same extracted feature matrices and run one after the other, reporting
+per-probe metrics, iteration-cap counts, and backend metric differences.
+Prioritize the cache stage before committing
 to all-layer MHA: start with `--stage cache --rows 512 --epochs 1`.
 Each full-data stage repeats image preparation and activation extraction, so
 running all stages separately has substantial setup cost.
+
+The updated preprocessing/linear benchmarks require matching copies of
+`probing.py`, `experiment_utils.py`, and the ignored
+`temp/benchmark/benchmark_probing.py` on the server. No new dependency is needed.
 
 Run other stages individually from `temp/benchmark/`, using a fresh name each time:
 
