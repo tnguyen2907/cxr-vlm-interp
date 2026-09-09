@@ -57,7 +57,8 @@ regenerating the split or retraining models.
 
 `/runs/` is gitignored. New benchmark and production commands require a fresh
 `--output-root runs/<name>` and keep a `console.log` there. Do not pre-create
-that run folder. Existing run folders are never reused, even after a failure.
+that run folder. Only `probing.py --resume` can reuse an existing run folder;
+benchmark, data-preparation, and SFT commands remain fresh-only.
 
 ## Environment
 
@@ -220,6 +221,38 @@ after training, not used to select an epoch. Earlier test-set tuning was
 exploratory; new hyperparameter selection requires a training-derived validation
 set before making an unbiased paper claim.
 
+### Continue an Interrupted Probing Run
+
+Use the original command and output folder, adding `--resume`:
+
+```bash
+python probing.py --resume \
+  --model all --prompt-order all --finding all \
+  --mha-layers global --activation-cache ram \
+  --adapter-root runs/2026-09-05_imported_artifacts/lora_sft \
+  --output-root runs/probing_full_global_01
+```
+
+Resume requires an existing folder and appends a dated entry to `console.log`.
+Before image preparation or GPU model loading, it prints completed/pending
+counts for MedSigLIP, linear probes, MHA probes, and yes/no blocks. A completed
+probe needs finite AUROC/AUPRC/prevalence and its nonempty final model file in
+the run's probe directory. Yes/no results also need one finite score row per
+manifest study, with the saved labels and split matching the manifest.
+
+Completed work is skipped, including whole combinations and models. If all
+requested results are complete, the script exits without preparing images or
+loading GPU models. Otherwise it rebuilds shared visual features as needed,
+skips MedSigLIP when its five probes are complete, and caches only missing MHA
+layers. RAM blocks still hold at most five layers; disk mode is also supported.
+Missing controls alone do not require a decoder pass.
+
+Keep the dataset, adapters, seed, and training settings unchanged, and use only
+one writer per folder. Changed experiments need a new folder. An unfinished
+probe restarts its training; optimizer state and activation-cache recovery are
+not saved. Resume recovers completed results, but does not keep an SSH-launched
+job alive after disconnection.
+
 ## Outputs and Cleanup
 
 ```text
@@ -244,13 +277,18 @@ runs/
 The CSV names and representation names remain compatible with previous results.
 Each fitted linear pipeline is a separate pickle; each MHA probe is a separate
 `.pt` state dictionary with dimensions. Full metric tables and yes/no scores are
-written after completed combinations; MHA metrics/checkpoints are saved per
-layer. Timings are printed and captured in `console.log`, not included in metric
+updated incrementally: each returned linear fit and each MHA probe is saved
+before its metric row, and each complete yes/no score block is saved before its
+metrics. Matching logical keys are replaced without duplicating results; other
+rows are retained. Models and CSVs are written to temporary sibling files and
+then renamed over their final files, so an interrupted write does not truncate
+the previously saved file. Leftover temporary files do not count as completed
+results. This applies to fresh runs as well as resumes.
+
+Timings are printed and captured in `console.log`, not included in metric
 CSVs. The shared log helper mirrors Python stdout/stderr and records uncaught
 tracebacks; native-library and child-process output can bypass that redirection.
-There is no automatic
-resume mechanism; an interruption preserves already saved outputs, and a rerun
-uses a new output root.
+Malformed existing CSVs raise an error rather than being silently discarded.
 
 Activation files live only in a run-owned temporary directory under
 `/opt/gpudata/trung/temp/mha_activation_cache/`. They are removed after use and on

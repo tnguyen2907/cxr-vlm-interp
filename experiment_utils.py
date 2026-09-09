@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 import os
 import sys
@@ -70,11 +71,17 @@ class _Tee:
 
 
 @contextmanager
-def run_log(output_root):
-    """Keep a fresh run's Python console output without overwriting earlier runs."""
-    output_root.mkdir(parents=True, exist_ok=False)
-    with (output_root / "console.log").open("x", encoding="utf-8") as log:
+def run_log(output_root, resume=False):
+    """Fresh runs are exclusive; an explicit resume preserves and appends the log."""
+    if resume:
+        if not output_root.is_dir():
+            raise FileNotFoundError(f"Cannot resume: run folder does not exist: {output_root}")
+    else:
+        output_root.mkdir(parents=True, exist_ok=False)
+    with (output_root / "console.log").open("a" if resume else "x", encoding="utf-8") as log:
         with redirect_stdout(_Tee(sys.stdout, log)), redirect_stderr(_Tee(sys.stderr, log)):
+            if resume:
+                print("\nResume:", datetime.now(timezone.utc).isoformat())
             print("Run folder:", output_root)
             print("Command:", sys.argv)
             try:

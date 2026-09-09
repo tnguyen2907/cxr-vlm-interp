@@ -3,7 +3,7 @@
 import argparse
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, ExitStack
+from contextlib import closing, contextmanager, ExitStack
 import gc
 from pathlib import Path
 import pickle
@@ -24,7 +24,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
 from tqdm.auto import tqdm
-from transformers import AutoModel, AutoModelForImageTextToText, AutoProcessor
+from transformers import AutoConfig, AutoModel, AutoModelForImageTextToText, AutoProcessor
 from transformers.models.siglip.configuration_siglip import SiglipVisionConfig
 from transformers.models.siglip.modeling_siglip import SiglipMultiheadAttentionPoolingHead
 
@@ -52,6 +52,10 @@ LAYER_BLOCK_SIZE = 5
 MODEL_NAMES = ["base_medgemma", "lora_image_first", "lora_text_first"]
 POOLED_FEATURES = ["medgemma_layer_mean_image_token", "medgemma_layer_last_image_token",
                    "medgemma_layer_final_prompt_token"]
+CONTROL_FEATURES = ["medgemma_pre_projector_mean_image_token", "medgemma_pre_decoder_mean_image_token"]
+MHA_FEATURE = "mha_pooled_image_token"
+YES_NO_FEATURE = "medgemma_yes_no_logprob"
+RESULT_KEY = ["model_name", "prompt_order", "condition", "label", "feature", "layer"]
 
 
 def slug(text):
@@ -110,12 +114,14 @@ def processed_image_batches(paths, processor, sig_processor=None, workers=IMAGE_
         def prepare_batch():
             start, images = next(source)
             try:
-                tick = perf_counter()
-                pixels = processor.image_processor(
-                    images=images, return_tensors="pt", do_pan_and_scan=False,
-                )["pixel_values"]
-                if timings is not None:
-                    timings["medgemma_processor_sec"] = timings.get("medgemma_processor_sec", 0) + perf_counter() - tick
+                pixels = None
+                if processor is not None:
+                    tick = perf_counter()
+                    pixels = processor.image_processor(
+                        images=images, return_tensors="pt", do_pan_and_scan=False,
+                    )["pixel_values"]
+                    if timings is not None:
+                        timings["medgemma_processor_sec"] = timings.get("medgemma_processor_sec", 0) + perf_counter() - tick
                 sig_pixels = None
                 if sig_processor is not None:
                     tick = perf_counter()
@@ -149,11 +155,13 @@ def processed_image_batches(paths, processor, sig_processor=None, workers=IMAGE_
 def prepare_visual_features(paths, medgemma, processor, include_medsiglip=True,
                             workers=IMAGE_LOAD_NUM_WORKERS, prefetch_batches=0, timings=None):
     """Bounded raw images; retain projected tokens, never a full raw/pixel cache."""
-    device = next(medgemma.parameters()).device
-    config = medgemma.config
-    n, tokens, dim = len(paths), config.mm_tokens_per_image, config.text_config.hidden_size
-    projected = torch.empty((n, tokens, dim), dtype=MODEL_DTYPE)
-    preprojector = np.empty((n, config.vision_config.hidden_size), dtype=np.float32)
+    device = next(medgemma.parameters()).device if medgemma is not None else torch.device("cuda:0")
+    n = len(paths)
+    projected = preprojector = None
+    if medgemma is not None:
+        config = medgemma.config
+        projected = torch.empty((n, config.mm_tokens_per_image, config.text_config.hidden_size), dtype=MODEL_DTYPE)
+        preprojector = np.empty((n, config.vision_config.hidden_size), dtype=np.float32)
     sig_features = None
     sig_processor = None
     if include_medsiglip:
@@ -168,15 +176,17 @@ def prepare_visual_features(paths, medgemma, processor, include_medsiglip=True,
         for start, pixels, sig_pixels in batches:
             if timings is not None:
                 timings["input_wait_sec"] = timings.get("input_wait_sec", 0) + perf_counter() - tick
-            batch_size = len(pixels)
+            batch_size = len(pixels) if pixels is not None else len(sig_pixels)
             end = start + batch_size
-            tick = perf_counter()
-            features, pre = extract_image_features(medgemma, pixels.to(device, dtype=MODEL_DTYPE))
-            projected[start:end].copy_(features)
-            preprojector[start:end] = pre.cpu().numpy()
-            if timings is not None:
-                timings["medgemma_gpu_pipeline_sec"] = timings.get("medgemma_gpu_pipeline_sec", 0) + perf_counter() - tick
-            del pixels, features, pre
+            if medgemma is not None:
+                tick = perf_counter()
+                features, pre = extract_image_features(medgemma, pixels.to(device, dtype=MODEL_DTYPE))
+                projected[start:end].copy_(features)
+                preprojector[start:end] = pre.cpu().numpy()
+                if timings is not None:
+                    timings["medgemma_gpu_pipeline_sec"] = timings.get("medgemma_gpu_pipeline_sec", 0) + perf_counter() - tick
+                del features, pre
+            del pixels
             if include_medsiglip:
                 offset = 0
                 while offset < batch_size:
@@ -212,12 +222,16 @@ def forward_prompt(model, prompt, image_features):
     return inputs, outputs
 
 
-def extract_activations(model, prompt, projected, layers, yes_no_ids, disk_dir=None, collect_linear=True, timings=None):
+def extract_activations(model, prompt, projected, layers, yes_no_ids, disk_dir=None, collect_linear=True, timings=None,
+                        collect_scores=None):
+    # Preserve existing benchmark callers; production can request scores without pooled arrays.
+    if collect_scores is None:
+        collect_scores = collect_linear
     n, tokens, dim = projected.shape
     count = model.config.text_config.num_hidden_layers
     cached = {} if disk_dir is not None else {i: torch.empty((n, tokens, dim), dtype=MODEL_DTYPE) for i in layers}
     pooled = {name: np.empty((n, count, dim), dtype=np.float32) for name in POOLED_FEATURES} if collect_linear else {}
-    logprob = np.empty((n, 2), dtype=np.float32) if collect_linear else None
+    logprob = np.empty((n, 2), dtype=np.float32) if collect_scores else None
     if disk_dir is not None:
         disk_dir.mkdir(parents=True, exist_ok=True)
         needed = n * tokens * dim * 4 * len(layers)
@@ -245,7 +259,7 @@ def extract_activations(model, prompt, projected, layers, yes_no_ids, disk_dir=N
             mask = inputs["input_ids"].eq(image_token_id(model.config))
             assert torch.all(mask.sum(dim=1) == tokens), "Image-token expansion changed"
             last_positions = inputs["attention_mask"].sum(dim=1) - 1
-            if collect_linear:
+            if collect_scores:
                 probs = outputs.logits[:, -1].float().log_softmax(-1)
                 logprob[start:end] = probs[:, list(yes_no_ids)].cpu().numpy()
             for layer, hidden in enumerate(outputs.hidden_states[1:]):
@@ -304,17 +318,26 @@ def fit_linear(x, y, train_idx, test_idx):
     return pipeline, result
 
 
-def train_linear_features(features, y, train_idx, test_idx, backend="loky"):
+def train_linear_features(features, y, train_idx, test_idx, backend="loky", only=None, on_complete=None):
     jobs = [(name, layer, x if x.ndim == 2 else x[:, layer])
-            for name, x in features.items() for layer in ([None] if x.ndim == 2 else range(x.shape[1]))]
+            for name, x in features.items() for layer in ([None] if x.ndim == 2 else range(x.shape[1]))
+            if only is None or (name, layer) in only]
+    if not jobs:
+        return []
+    fitted = []
     options = {"inner_max_num_threads": LINEAR_INNER_NUM_THREADS} if backend == "loky" else {}
     # Thread limits are process-wide: one outer context, never per threaded fit.
     with threadpool_limits(limits=LINEAR_INNER_NUM_THREADS), parallel_config(
         backend=backend, n_jobs=LINEAR_PARALLEL_JOBS, **options,
     ):
-        fitted = Parallel(max_nbytes=None)(delayed(fit_linear)(x, y, train_idx, test_idx) for _, _, x in jobs)
-    print("Linear fits hitting max_iter", sum(result[1]["n_iter"] >= MAX_ITER for result in fitted))
-    return [(name, layer, pipeline, result) for (name, layer, _), (pipeline, result) in zip(jobs, fitted)]
+        with Parallel(max_nbytes=None, return_as="generator") as pool:
+            with closing(pool(delayed(fit_linear)(x, y, train_idx, test_idx) for _, _, x in jobs)) as outputs:
+                for (name, layer, _), (pipeline, result) in zip(jobs, outputs):
+                    if on_complete is not None:
+                        on_complete(name, layer, pipeline, result)
+                    fitted.append((name, layer, pipeline, result))
+    print("Linear fits hitting max_iter", sum(result["n_iter"] >= MAX_ITER for _, _, _, result in fitted))
+    return fitted
 
 
 class MHAPoolingProbe(torch.nn.Module):
@@ -391,31 +414,95 @@ def train_mha(tokens, y, train_idx, test_idx, epochs=MHA_EPOCHS, cache_on_gpu=Tr
     return probe.cpu(), result, timing
 
 
-def save_probe(root, model_name, order, label, feature, layer, probe, result):
+def probe_path(root, model_name, order, label, feature, layer):
     folder = root / "probes" / slug(model_name) / order / slug(label) / ("layer_none" if layer is None else f"layer_{layer:02d}")
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / (feature + (".pt" if isinstance(probe, torch.nn.Module) else ".pkl"))
-    if isinstance(probe, torch.nn.Module):
-        torch.save({"state_dict": probe.state_dict(), "hidden_size": probe.classifier.in_features,
-                    "intermediate_size": MHA_MLP_DIM, "num_attention_heads": MHA_NUM_HEADS}, path)
-    else:
-        with path.open("wb") as file:
-            pickle.dump(probe, file)
+    return folder / (feature + (".pt" if feature == MHA_FEATURE else ".pkl"))
+
+
+@contextmanager
+def atomic_output(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        yield temporary
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def save_probe(root, model_name, order, label, feature, layer, probe, result):
+    path = probe_path(root, model_name, order, label, feature, layer)
+    with atomic_output(path) as temporary:
+        if isinstance(probe, torch.nn.Module):
+            torch.save({"state_dict": probe.state_dict(), "hidden_size": probe.classifier.in_features,
+                        "intermediate_size": MHA_MLP_DIM, "num_attention_heads": MHA_NUM_HEADS}, temporary)
+        else:
+            with temporary.open("wb") as file:
+                pickle.dump(probe, file)
     return {"model_name": model_name, "prompt_order": order, "condition": label, "feature": feature,
             "layer": layer, "label": label, "feature_dim": (probe.classifier.in_features if isinstance(probe, torch.nn.Module)
                                                              else probe.n_features_in_),
             **result, "model_path": str(path)}
 
 
-def append_table(rows, path):
-    path.parent.mkdir(parents=True, exist_ok=True)
+def update_table(rows, path, replace_by=RESULT_KEY):
+    """Replace matching keys, preserving other results; score blocks use combination keys."""
     frame = pd.DataFrame(rows)
-    frame.to_csv(path, mode="a", header=not path.exists(), index=False)
+    if path.exists():
+        old = pd.read_csv(path, float_precision="round_trip")
+        replaced = pd.MultiIndex.from_frame(old[replace_by]).isin(pd.MultiIndex.from_frame(frame[replace_by]))
+        frame = pd.concat([old.loc[~replaced], frame], ignore_index=True)
+    with atomic_output(path) as temporary:
+        frame.to_csv(temporary, index=False)
+
+
+def completed_results(root, df=None):
+    """Lightweight checks of final files only; temporary files never count as progress."""
+    path = root / "results/experiment_metrics.csv"
+    if not path.exists():
+        return set()
+    table = pd.read_csv(path, float_precision="round_trip")
+    valid = np.isfinite(table[["auroc", "auprc", "positive_prevalence"]].apply(pd.to_numeric, errors="coerce")).all(axis=1)
+    valid &= table[RESULT_KEY[:-1]].notna().all(axis=1)
+    complete_scores = set()
+    score_path = root / "results/experiment_yes_no_scores.csv"
+    if df is not None and score_path.exists():
+        scores = pd.read_csv(score_path, float_precision="round_trip")
+        for identity, block in scores.groupby(["model_name", "prompt_order", "label"]):
+            if (len(block) != len(df) or not block.study_id.is_unique
+                    or set(block.study_id) != set(df.study_id)):
+                continue
+            numeric = block[["logprob_yes", "logprob_no", "score_yes_minus_no"]].apply(pd.to_numeric, errors="coerce")
+            if not np.isfinite(numeric).all().all() or block[["y_true", "pred_yes", "probe_split"]].isna().any().any():
+                continue
+            aligned = block.set_index("study_id").loc[df.study_id]
+            if identity[2] not in df or not np.array_equal(aligned.y_true, df[identity[2]].eq(1)):
+                continue
+            if np.array_equal(aligned.probe_split, df.probe_split):
+                complete_scores.add(identity)
+    completed = set()
+    for row in table.loc[valid].itertuples(index=False):
+        layer = None if pd.isna(row.layer) else float(row.layer)
+        if layer is not None:
+            if not np.isfinite(layer) or not layer.is_integer():
+                continue
+            layer = int(layer)
+        key = (row.model_name, row.prompt_order, row.condition, row.label, row.feature, layer)
+        if row.feature == YES_NO_FEATURE:
+            if (row.model_name, row.prompt_order, row.label) in complete_scores:
+                completed.add(key)
+        else:
+            saved = probe_path(root, row.model_name, row.prompt_order, row.label, row.feature, layer)
+            if (saved.resolve().is_relative_to((root / "probes").resolve())
+                    and saved.is_file() and saved.stat().st_size > 0):
+                completed.add(key)
+    return completed
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-root", type=resolve_path, required=True, help="Fresh runs/<run_name> folder")
+    parser.add_argument("--output-root", type=resolve_path, required=True, help="Fresh runs/<run_name> folder, or existing folder with --resume")
+    parser.add_argument("--resume", action="store_true", help="Preserve completed probes and continue an existing run with unchanged inputs/settings")
     parser.add_argument("--adapter-root", type=resolve_path, default=IMPORTED_RUN_ROOT / "lora_sft")
     parser.add_argument("--model", choices=["all"] + MODEL_NAMES, default="all")
     parser.add_argument("--prompt-order", choices=["all"] + PROMPT_ORDERS, default="all")
@@ -423,48 +510,88 @@ def main():
     parser.add_argument("--mha-layers", default="global", help="global, all, or comma-separated zero-indexed layers")
     parser.add_argument("--activation-cache", choices=["ram", "disk"], default="ram")
     args = parser.parse_args()
-    with run_log(args.output_root):
+    with run_log(args.output_root, resume=args.resume):
         run(args)
 
 
 def run(args):
-    configure_runtime()
     print("Manifest:", DATA_CSV)
     print("Adapter root:", args.adapter_root)
     models = MODEL_NAMES if args.model == "all" else [args.model]
-    for name in models:
-        if name != "base_medgemma":
-            adapter = args.adapter_root / (name.removeprefix("lora_") + "_adapter")
-            if not (adapter / "adapter_config.json").is_file():
-                raise FileNotFoundError(f"Adapter config missing: {adapter}")
     linear_root = args.output_root / "probing/linear_probe"
     mha_root = args.output_root / "probing/multi_head_attention_probe"
     df = pd.read_csv(DATA_CSV)
     train_idx = np.flatnonzero(df.probe_split.eq("train"))
     test_idx = np.flatnonzero(df.probe_split.eq("test"))
     labels = df[TARGET_LABELS].eq(1).to_numpy(dtype=np.int8)
-    processor = AutoProcessor.from_pretrained(MEDGEMMA_MODEL_ID)
-    prompts, answer_ids = tokenize_prompts(processor), answer_token_ids(processor)
-    model = load_medgemma()
+    orders = PROMPT_ORDERS if args.prompt_order == "all" else [args.prompt_order]
+    findings = TARGET_LABELS if args.finding == "all" else [args.finding]
+    config = AutoConfig.from_pretrained(MEDGEMMA_MODEL_ID)
+    selected = select_layers(config, args.mha_layers)
+    linear_keys = [(name, layer) for name in POOLED_FEATURES for layer in range(config.text_config.num_hidden_layers)]
+    linear_keys += [(name, None) for name in CONTROL_FEATURES]
+    done_linear = completed_results(linear_root, df) if args.resume else set()
+    done_mha = completed_results(mha_root) if args.resume else set()
+    baseline_missing = [label for label in TARGET_LABELS if
+                        ("medsiglip_standalone", "baseline", label, label, "medsiglip_standalone", None) not in done_linear]
+    work, summary = [], []
+    for model_name in models:
+        for order in orders:
+            for label in findings:
+                prefix = (model_name, order, label, label)
+                missing_linear = [key for key in linear_keys if prefix + key not in done_linear]
+                missing_mha = [layer for layer in selected if prefix + (MHA_FEATURE, layer) not in done_mha]
+                need_scores = prefix + (YES_NO_FEATURE, None) not in done_linear
+                summary.append({"model": model_name, "order": order, "finding": label,
+                                "linear_complete": len(linear_keys) - len(missing_linear), "linear_pending": len(missing_linear),
+                                "mha_complete": len(selected) - len(missing_mha), "mha_pending": len(missing_mha),
+                                "scores_pending": need_scores})
+                if missing_linear or missing_mha or need_scores:
+                    work.append((model_name, order, label, missing_linear, missing_mha, need_scores))
+    print("MedSigLIP complete", len(TARGET_LABELS) - len(baseline_missing), "pending", len(baseline_missing))
+    print(pd.DataFrame(summary).to_string(index=False))
+    if not work and not baseline_missing:
+        print("All requested results are complete; nothing to run.")
+        return
+    for name in {item[0] for item in work}:
+        if name != "base_medgemma":
+            adapter = args.adapter_root / (name.removeprefix("lora_") + "_adapter")
+            if not (adapter / "adapter_config.json").is_file():
+                raise FileNotFoundError(f"Adapter config missing: {adapter}")
+    configure_runtime()
+    processor = AutoProcessor.from_pretrained(MEDGEMMA_MODEL_ID) if work else None
+    model = load_medgemma() if work else None
     with Measure("shared_visual_features", ACTIVATION_ROOT):
-        projected, preprojector, standalone = prepare_visual_features(df.image_path.tolist(), model, processor)
+        projected, preprojector, standalone = prepare_visual_features(
+            df.image_path.tolist(), model, processor, include_medsiglip=bool(baseline_missing),
+        )
     # Adapter verification below uses the same batch shape as image preparation.
     del model
     gc.collect()
     torch.cuda.empty_cache()
-    with Measure("medsiglip_linear", ACTIVATION_ROOT):
-        for i, label in enumerate(TARGET_LABELS):
-            with threadpool_limits(limits=LINEAR_INNER_NUM_THREADS):
-                probe, result = fit_linear(standalone, labels[:, i], train_idx, test_idx)
-            row = save_probe(linear_root, "medsiglip_standalone", "baseline", label, "medsiglip_standalone", None, probe, result)
-            append_table([row], linear_root / "results/experiment_metrics.csv")
-        del standalone, probe
-    predecoder = np.empty((len(df), projected.shape[-1]), dtype=np.float32)
-    for start in range(0, len(df), MEDGEMMA_BATCH_SIZE):
-        predecoder[start:start + MEDGEMMA_BATCH_SIZE] = projected[start:start + MEDGEMMA_BATCH_SIZE].float().mean(1).numpy()
-    orders = PROMPT_ORDERS if args.prompt_order == "all" else [args.prompt_order]
-    findings = TARGET_LABELS if args.finding == "all" else [args.finding]
+    if baseline_missing:
+        with Measure("medsiglip_linear", ACTIVATION_ROOT):
+            for label in baseline_missing:
+                i = TARGET_LABELS.index(label)
+                with threadpool_limits(limits=LINEAR_INNER_NUM_THREADS):
+                    probe, result = fit_linear(standalone, labels[:, i], train_idx, test_idx)
+                row = save_probe(linear_root, "medsiglip_standalone", "baseline", label, "medsiglip_standalone", None, probe, result)
+                update_table([row], linear_root / "results/experiment_metrics.csv")
+                del probe
+    del standalone
+    if not work:
+        print("After run cleanup", resource_snapshot(ACTIVATION_ROOT))
+        return
+    prompts, answer_ids = tokenize_prompts(processor), answer_token_ids(processor)
+    predecoder = None
+    if any((CONTROL_FEATURES[1], None) in item[3] for item in work):
+        predecoder = np.empty((len(df), projected.shape[-1]), dtype=np.float32)
+        for start in range(0, len(df), MEDGEMMA_BATCH_SIZE):
+            predecoder[start:start + MEDGEMMA_BATCH_SIZE] = projected[start:start + MEDGEMMA_BATCH_SIZE].float().mean(1).numpy()
     for model_name in models:
+        model_work = [item for item in work if item[0] == model_name]
+        if not model_work:
+            continue
         adapter = None if model_name == "base_medgemma" else args.adapter_root / (model_name.removeprefix("lora_") + "_adapter")
         model = load_medgemma(adapter)
         for _, images in image_batches(df.image_path.iloc[:MEDGEMMA_BATCH_SIZE]):
@@ -473,57 +600,75 @@ def run(args):
             torch.testing.assert_close(actual.cpu(), projected[:len(images)], rtol=0, atol=0)
             torch.testing.assert_close(actual_pre.cpu(), torch.from_numpy(preprojector[:len(images)]), rtol=0, atol=0)
             del actual, actual_pre, pixels
-        selected = select_layers(model.config, args.mha_layers)
         print(model_name, "MHA layers", selected, flush=True)
-        for order in orders:
-            for label in findings:
-                y = labels[:, TARGET_LABELS.index(label)]
-                identity = f"{model_name}/{order}/{slug(label)}"
-                with ExitStack() as unit:
-                    disk_dir = None
-                    if args.activation_cache == "disk":
-                        ACTIVATION_ROOT.mkdir(parents=True, exist_ok=True)
-                        disk_dir = Path(unit.enter_context(TemporaryDirectory(prefix=args.output_root.name + "_", dir=ACTIVATION_ROOT)))
-                    blocks = [selected] if disk_dir else [selected[i:i + LAYER_BLOCK_SIZE] for i in range(0, len(selected), LAYER_BLOCK_SIZE)]
-                    for block_i, block in enumerate(blocks):
-                        with Measure(identity + f"/extract_{block_i}", ACTIVATION_ROOT):
-                            cached, pooled, logprob = extract_activations(model, prompts[(order, label)], projected, block,
-                                                                        answer_ids, disk_dir, collect_linear=block_i == 0)
-                        if block_i == 0:
-                            pooled.update(medgemma_pre_projector_mean_image_token=preprojector,
-                                          medgemma_pre_decoder_mean_image_token=predecoder)
-                            with Measure(identity + "/linear", ACTIVATION_ROOT):
-                                fitted = train_linear_features(pooled, y, train_idx, test_idx)
-                                rows = [save_probe(linear_root, model_name, order, label, name, layer, probe, result)
-                                        for name, layer, probe, result in fitted]
-                            score = logprob[:, 0] - logprob[:, 1]
-                            rows.append({"model_name": model_name, "prompt_order": order, "condition": label,
-                                         "feature": "medgemma_yes_no_logprob", "layer": None, "label": label,
-                                         "feature_dim": 1, **metrics(y[test_idx], score[test_idx]), "n_iter": None, "model_path": ""})
-                            append_table(rows, linear_root / "results/experiment_metrics.csv")
-                            scores = df[["study_id", "subject_id", "dicom_id", "probe_split"]].assign(
-                                model_name=model_name, prompt_order=order, label=label, y_true=y,
-                                logprob_yes=logprob[:, 0], logprob_no=logprob[:, 1], score_yes_minus_no=score, pred_yes=score > 0,
-                            )
-                            append_table(scores, linear_root / "results/experiment_yes_no_scores.csv")
-                            del fitted, pooled, logprob, scores, rows
-                        for layer in block:
-                            with Measure(identity + f"/mha_L{layer}", ACTIVATION_ROOT):
-                                tokens = load_layer(disk_dir / f"layer_{layer:02d}.h5") if disk_dir else cached.pop(layer)
-                                probe, result, timing = train_mha(tokens, y, train_idx, test_idx)
-                                row = save_probe(mha_root, model_name, order, label, "mha_pooled_image_token", layer, probe, result)
-                                append_table([row], mha_root / "results/experiment_metrics.csv")
-                                print({"layer": layer, **result, **timing})
-                                del tokens, probe
-                            if disk_dir:
-                                (disk_dir / f"layer_{layer:02d}.h5").unlink()
-                            gc.collect()
-                            torch.cuda.empty_cache()
-                        del cached
+        for _, order, label, missing_linear, missing_mha, need_scores in model_work:
+            y = labels[:, TARGET_LABELS.index(label)]
+            identity = f"{model_name}/{order}/{slug(label)}"
+
+            def save_linear_result(name, layer, probe, result):
+                row = save_probe(linear_root, model_name, order, label, name, layer, probe, result)
+                update_table([row], linear_root / "results/experiment_metrics.csv")
+
+            controls = {name: value for name, value in zip(CONTROL_FEATURES, (preprojector, predecoder))
+                        if (name, None) in missing_linear}
+            need_pooled = any(name in POOLED_FEATURES for name, _ in missing_linear)
+            if controls and not need_pooled:
+                with Measure(identity + "/linear_controls", ACTIVATION_ROOT):
+                    fitted = train_linear_features(controls, y, train_idx, test_idx, on_complete=save_linear_result)
+                del fitted
+            with ExitStack() as unit:
+                disk_dir = None
+                if args.activation_cache == "disk" and missing_mha:
+                    ACTIVATION_ROOT.mkdir(parents=True, exist_ok=True)
+                    disk_dir = Path(unit.enter_context(TemporaryDirectory(prefix=args.output_root.name + "_", dir=ACTIVATION_ROOT)))
+                blocks = [missing_mha] if disk_dir else [missing_mha[i:i + LAYER_BLOCK_SIZE] for i in range(0, len(missing_mha), LAYER_BLOCK_SIZE)]
+                if not blocks and (need_pooled or need_scores):
+                    blocks = [[]]
+                for block_i, block in enumerate(blocks):
+                    with Measure(identity + f"/extract_{block_i}", ACTIVATION_ROOT):
+                        cached, pooled, logprob = extract_activations(
+                            model, prompts[(order, label)], projected, block, answer_ids, disk_dir,
+                            collect_linear=block_i == 0 and need_pooled,
+                            collect_scores=block_i == 0 and need_scores,
+                        )
+                    if block_i == 0 and need_scores:
+                        score = logprob[:, 0] - logprob[:, 1]
+                        scores = df[["study_id", "subject_id", "dicom_id", "probe_split"]].assign(
+                            model_name=model_name, prompt_order=order, label=label, y_true=y,
+                            logprob_yes=logprob[:, 0], logprob_no=logprob[:, 1], score_yes_minus_no=score, pred_yes=score > 0,
+                        )
+                        update_table(scores, linear_root / "results/experiment_yes_no_scores.csv",
+                                     replace_by=["model_name", "prompt_order", "label"])
+                        row = {"model_name": model_name, "prompt_order": order, "condition": label,
+                               "feature": YES_NO_FEATURE, "layer": None, "label": label,
+                               "feature_dim": 1, **metrics(y[test_idx], score[test_idx]), "n_iter": None, "model_path": ""}
+                        update_table([row], linear_root / "results/experiment_metrics.csv")
+                        del scores, score
+                    if block_i == 0 and need_pooled:
+                        pooled.update(controls)
+                        with Measure(identity + "/linear", ACTIVATION_ROOT):
+                            fitted = train_linear_features(pooled, y, train_idx, test_idx, only=missing_linear,
+                                                           on_complete=save_linear_result)
+                        del fitted
+                    del pooled, logprob
+                    for layer in block:
+                        with Measure(identity + f"/mha_L{layer}", ACTIVATION_ROOT):
+                            tokens = load_layer(disk_dir / f"layer_{layer:02d}.h5") if disk_dir else cached.pop(layer)
+                            probe, result, timing = train_mha(tokens, y, train_idx, test_idx)
+                            row = save_probe(mha_root, model_name, order, label, MHA_FEATURE, layer, probe, result)
+                            update_table([row], mha_root / "results/experiment_metrics.csv")
+                            print({"layer": layer, **result, **timing})
+                            del tokens, probe
+                        if disk_dir:
+                            (disk_dir / f"layer_{layer:02d}.h5").unlink()
                         gc.collect()
                         torch.cuda.empty_cache()
-                        print("After block cleanup", resource_snapshot(ACTIVATION_ROOT))
-                print("After combination cleanup", resource_snapshot(ACTIVATION_ROOT))
+                    del cached
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    print("After block cleanup", resource_snapshot(ACTIVATION_ROOT))
+            del controls
+            print("After combination cleanup", resource_snapshot(ACTIVATION_ROOT))
         del model
         gc.collect()
         torch.cuda.empty_cache()
@@ -531,7 +676,6 @@ def run(args):
     gc.collect()
     torch.cuda.empty_cache()
     print("After run cleanup", resource_snapshot(ACTIVATION_ROOT))
-
 
 if __name__ == "__main__":
     main()
