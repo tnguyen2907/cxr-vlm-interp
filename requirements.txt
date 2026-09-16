@@ -14,19 +14,26 @@ matplotlib
 seaborn
 
 # Feature extraction
-# MedGemma/Gemma 3 support starts at transformers 4.50.0.
-transformers>=4.50.0
-accelerate
-datasets
-peft
-trl
-huggingface-hub
+# Keep the model, PEFT, and TRL APIs on the versions used by this project.
+transformers>=5.8,<5.10
+accelerate>=1.4,<2
+datasets>=4.7,<5
+peft==0.19.1
+trl==1.4.0
+huggingface-hub>=1,<2
 safetensors
 sentencepiece
 protobuf
 pillow
 h5py
 
---extra-index-url https://download.pytorch.org/whl/cu126
-torch==2.11.0+cu126
-torchvision==0.26.0+cu126
+# Report evaluation (same F1CheXbert release as LaB-RAG).
+radgraph==0.1.18
+f1chexbert==0.0.2
+
+# One CUDA 12.9 stack for training, evaluation, and vLLM inference.
+--extra-index-url https://download.pytorch.org/whl/cu129
+torch==2.11.0+cu129
+torchvision==0.26.0+cu129
+torchaudio==2.11.0+cu129
+vllm @ https://github.com/vllm-project/vllm/releases/download/v0.22.0/vllm-0.22.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == "linux" and platform_machine == "x86_64"

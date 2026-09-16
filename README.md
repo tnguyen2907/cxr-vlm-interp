@@ -23,10 +23,13 @@ manually, not tracked in Git.
 process_data.py                  prepare the existing study-level split
 lora_sft.py                      train the two adapters only when requested
 probing.py                       shared linear/MHA probing and yes/no evaluation
+report_generation.py             Findings generation with explicit resume
+evaluate_reports.py              independent RadGraph/CheXbert evaluation
 experiment_utils.py             bounded images and exact prompt handling
 visualization.ipynb
 resource_monitor.py             shared production/benchmark resource monitoring
 temp/benchmark/benchmark_probing.py staged comparisons, console.log only
+temp/benchmark/benchmark_report_generation.py report inference/evaluation/SFT pilot
 paper/                          existing paper sources and PDF
 temp/archive/notebooks/         historical execution and benchmark notebooks
 temp/tests/                     optional local development checks
@@ -57,7 +60,7 @@ regenerating the split or retraining models.
 
 `/runs/` is gitignored. New benchmark and production commands require a fresh
 `--output-root runs/<name>` and keep a `console.log` there. Do not pre-create
-that run folder. Only `probing.py --resume` can reuse an existing run folder;
+that run folder. `probing.py --resume` and `report_generation.py --resume` can reuse their existing run folders;
 benchmark, data-preparation, and SFT commands remain fresh-only.
 
 ## Environment
@@ -74,10 +77,11 @@ or:
 pip install -r requirements.txt
 ```
 
-The refactor adds `psutil`. Keep the working server environment; do not upgrade
-Transformers merely to run these scripts. The correctness benchmark prints the
-installed versions because cached image-feature handling depends on HF's model
-implementation. Local tests are not a substitute for this server check.
+The environment uses one pinned CUDA 12.9 stack for training, probing, report
+evaluation, and vLLM inference. Updating an older checkout replaces its CUDA
+12.6 PyTorch wheels. Run `pip check` afterward. The correctness benchmark prints
+the installed versions because cached image-feature handling depends on HF's
+model implementation. Local tests are not a substitute for this server check.
 
 ## Run Benchmarks First
 
@@ -323,5 +327,153 @@ single yes/no answer token using full-vocabulary cross-entropy. Adapter files
 and training logs are saved in the new run's `lora_sft/` folder. Existing adapters
 are not overwritten or retrained as part of this migration.
 
-The next research phase, after MHA, is report-generation transfer using the base
-model and existing adapters. It is not implemented by this refactor.
+## Report-Generation Transfer
+
+The report workflow is implemented locally; real-data/GPU benchmarks are still
+required before a full run. It compares original MedGemma with both existing
+classification adapters, each under image-first and text-first generation.
+The target is **Findings only**. Reuse the original test manifest and images;
+no classification retraining, retrieval, gold labels, or impression fallback.
+There are up to 5,000 eligible studies per condition, or 30,000 reports total.
+
+`report_generation.py` joins `report.csv` on `study_id`, reports missing/empty
+findings, and saves a matched cohort before inference. It defaults to batched
+Transformers, BF16, greedy decoding, 512 new tokens, and pan-and-scan disabled.
+`--model custom --model-name <name> --checkpoint <checkpoint> --adapter-path <path>`
+also accepts a future report-trained model; omit the adapter for a full checkpoint.
+Explicit checkpoint overrides apply only with `--model custom`.
+
+### Environments
+
+The main environment includes Transformers, probing, report SFT, report
+scorers, and vLLM. Its vLLM wheel and PyTorch packages use the same CUDA 12.9
+build, so no secondary environment is needed. No packages are installed by our
+scripts.
+
+```bash
+conda activate cxr-vlm-interp
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+The dependency graph was resolver-checked for Python 3.11: the main environment
+resolves Torch 2.11/CUDA 12.9, Transformers 5.9, PEFT 0.19.1, TRL 1.4,
+vLLM 0.22, RadGraph 0.1.18, and F1CheXbert 0.0.2. The server's H200 driver
+580.159.04 exceeds CUDA 12.9's native driver requirement. This is not yet a
+server-installed lockfile, so run `pip check` after installation. Resolved
+versions are logged in every run. Models require the usual Hugging Face access;
+do not place access tokens in commands copied back to chat. The evaluator
+downloads the package checkpoints when first used. It includes narrow
+compatibility shims for the legacy scorer tokenizer API and CheXbert's
+flat-cache-path expectation without changing either scoring model.
+
+### Benchmark Commands
+
+Retain Slurm's `CUDA_VISIBLE_DEVICES`; one allocated H200 is sufficient for the
+planned comparisons. Start with 32 allocated logical CPUs and about 100G RAM;
+review measured usage before increasing the submitted image queue. Scripts cap
+CPU affinity but do not kill runs at a resource threshold. Native vLLM child
+logs may bypass `console.log`; a shell `tee` can capture the complete terminal.
+
+Copy the ignored `temp/benchmark/benchmark_report_generation.py` to the same
+location on the server. Use a fresh output folder for every command.
+
+```bash
+cd "$HOME/workspace/cxr-vlm-interp"
+conda activate cxr-vlm-interp
+python temp/benchmark/benchmark_report_generation.py --stage coverage --output-root runs/report_coverage_01
+python temp/benchmark/benchmark_report_generation.py --stage correctness --engine transformers --output-root runs/report_correctness_hf_01
+python temp/benchmark/benchmark_report_generation.py --stage correctness --engine both --output-root runs/report_correctness_both_01
+python temp/benchmark/benchmark_report_generation.py --stage inference --engine both --output-root runs/report_inference_01
+python temp/benchmark/benchmark_report_generation.py --stage report_sft --output-root runs/report_sft_benchmark_01
+```
+
+Correctness covers eight training studies and all six model/order conditions.
+It checks expanded prompt IDs (256 image placeholders), native processor pixel
+agreement, first-token log probabilities, and stopping. It prints the installed
+vLLM Gemma attention implementation location and relevant warning lines.
+**Review multimodal attention semantics and numerical differences before
+adopting vLLM.** Matching token IDs alone is not proof of equivalent inference.
+If the implementations differ semantically, use Transformers; do not accept a
+speed improvement that changes the experiment.
+
+Inference compares 512 training studies, two orders, and two repeats. It first
+compares Transformers with vLLM, then whole-queue versus groups of 256, then
+prefix caching. Warm-up inputs are disjoint; caches reset before timed trials.
+Engine startup, reports/sec, tokens/sec, output lengths, CPU/RAM and GPU usage
+are reported. GPU device telemetry includes vLLM workers; PyTorch allocator
+peaks describe the parent process only. Scheduler counters print where exposed.
+The 5% whole-queue speed criterion produces a candidate only: check full-cohort
+RAM before adoption. No benchmark edits production defaults automatically.
+
+`--submission-size 0` queues every pending study in a condition; vLLM still
+chooses its own active GPU batches. Default groups of 256 limit host image
+memory and save more frequently. A blocking call saves only after that group
+returns. Both modes keep the model loaded across groups.
+
+Report SFT uses 1,024 training studies, microbatches 4/8/16/32, effective batch
+64, rank-16 decoder LoRA, and LR 1e-4. It times three warm-up plus ten measured
+optimizer steps, stops the increasing batch sweep at OOM, and checks the
+selected batch with text-first prompts. Its loss supervises the complete
+reference Findings text and end-of-turn token, never the prompt/image/padding.
+This is a runtime/memory benchmark, not accuracy tuning or full training.
+Only its temporary trainer directory is deleted; existing adapters are untouched.
+
+### Generation, Evaluation, And Resume
+
+First save a small training pilot and time evaluation on those reports:
+
+```bash
+conda activate cxr-vlm-interp
+python report_generation.py --split train --rows 32 --model all --prompt-order all --output-root runs/report_pilot_01
+
+conda activate cxr-vlm-interp
+python temp/benchmark/benchmark_report_generation.py --stage evaluation --input-root runs/report_pilot_01 --output-root runs/report_eval_benchmark_01
+```
+
+After reviewing the benchmark logs, run the full held-out comparison. The
+following uses the correctness reference; select `--engine vllm` only after it
+passes the review. Keep the chosen settings fixed.
+
+```bash
+conda activate cxr-vlm-interp
+python report_generation.py --model all --prompt-order all --engine transformers --output-root runs/report_transfer_01
+# After an interruption, repeat exactly that command with --resume added.
+
+conda activate cxr-vlm-interp
+python evaluate_reports.py --input-root runs/report_transfer_01 --output-root runs/report_transfer_eval_01
+```
+
+Generation saves `report_generation/{cohort.csv,generations.csv,metadata.json}`
+and the run's `console.log`. Resume validates the same cohort/settings and skips
+saved `(model_name,prompt_order,study_id)` rows, including legitimate empty
+generations. Completed runs exit before GPU loading. Writes replace temporary
+sibling files atomically. This does not keep an SSH job alive; use a persistent
+Slurm job or your usual terminal session management.
+
+Evaluation requires the complete requested cohort in every condition. It writes
+`report_generation/{per_study_metrics.csv,metrics.csv,paired_differences.csv,`
+`generation_quality.csv,reference_annotations.json,evaluation_metadata.json,`
+`qualitative_review.csv}` beneath a **new evaluation run**. Re-score without
+regenerating reports by choosing another evaluation output folder.
+
+Primary score: mean RadGraph-XL **partial** F1. Supporting scores: CheXbert
+micro/macro/per-label F1 over 14 categories, the five SFT findings, and the
+remaining nine. Only class 1 is positive; uncertain/unmentioned are nonpositive.
+This deliberately differs from `F1CheXbert`'s default `rrg` uncertainty mapping
+and from averaging the old project's per-report F1. Empty generations remain
+in the denominator with RadGraph=0 and no positive CheXbert predictions.
+Length-capped reports are retained and counted. No heuristic report rewriting.
+Patient-level paired bootstrap intervals use 1,000 resamples, seed 42; compare
+adapters against base within each prompt order. The matched 20-study review CSV
+is for human inspection, not an automated clinical-quality judgment.
+
+To plot, run the imports and the final report cell in `visualization.ipynb`.
+Set `REPORT_ROOT` to the evaluation run; no probing metrics or model inference
+are needed. It saves report tables and an F1 comparison figure under that run's
+`report_generation/visualization/`. Existing probing plots and paper stay intact.
+
+Full report-supervised training remains deferred until these transfer results
+are reviewed. Future checkpoint/epoch selection must use training-derived
+validation, not the held-out report cohort. Benchmarks supply runtime estimates;
+no H200 throughput or clinical benefit has yet been verified for this workflow.
