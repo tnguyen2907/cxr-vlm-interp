@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import shutil
+from types import MethodType
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,13 @@ CHEXBERT_LABELS = [
 EVAL_BATCH_SIZE = 16
 
 
+def bert_inputs_with_special_tokens(tokenizer, token_ids_0, token_ids_1=None):
+    output = [tokenizer.cls_token_id, *token_ids_0, tokenizer.sep_token_id]
+    if token_ids_1 is not None:
+        output.extend([*token_ids_1, tokenizer.sep_token_id])
+    return output
+
+
 def enable_legacy_scorer_compat():
     """Bridge the two legacy scorer packages to Transformers 5.8-5.9."""
     from transformers import PreTrainedTokenizerBase
@@ -38,7 +46,12 @@ def enable_legacy_scorer_compat():
 
         def get_tokenizer(model_name, **kwargs):
             kwargs.pop("add_special_tokens", None)
-            return original(model_name, **kwargs)
+            tokenizer = original(model_name, **kwargs)
+            if not hasattr(tokenizer, "build_inputs_with_special_tokens"):
+                tokenizer.build_inputs_with_special_tokens = MethodType(
+                    bert_inputs_with_special_tokens, tokenizer,
+                )
+            return tokenizer
 
         get_tokenizer._cxr_compat = True
         cached_transformers.get_tokenizer = get_tokenizer
