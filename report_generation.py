@@ -191,7 +191,7 @@ def generate_reports(model, processor, stops, frame, order, *, engine="transform
                         results.append(row)
                     del requests, outputs
                 else:
-                    inputs = processor(text=[prompt] * len(images), images=images, return_tensors="pt",
+                    inputs = processor(text=[prompt] * len(images), images=[[image] for image in images], return_tensors="pt",
                                        padding=True, add_special_tokens=False, do_pan_and_scan=False)
                     if inputs["input_ids"].shape[1] + max_new_tokens > MAX_MODEL_LEN:
                         raise ValueError("Prompt + generation exceeds the context budget; no truncation is allowed.")
