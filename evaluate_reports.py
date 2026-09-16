@@ -66,12 +66,13 @@ class ReportScorer:
 
     @torch.inference_mode()
     def labels(self, reports):
-        from f1chexbert.f1chexbert import tokenize
-        rows = tokenize(pd.Series(reports), self.chexbert.tokenizer)
-        lengths = torch.tensor([len(row) for row in rows], device=self.chexbert.device)
-        ids = torch.nn.utils.rnn.pad_sequence([torch.tensor(row) for row in rows], batch_first=True,
-                                             padding_value=self.chexbert.tokenizer.pad_token_id).to(self.chexbert.device)
-        mask = torch.arange(ids.shape[1], device=ids.device)[None] < lengths[:, None]
+        texts = pd.Series(reports, dtype=str).str.strip().str.replace("\n", " ", regex=False)
+        texts = texts.str.replace(r"\s+", " ", regex=True).str.strip().tolist()
+        encoded = self.chexbert.tokenizer(
+            texts, padding=True, truncation=True, max_length=512, return_tensors="pt",
+        )
+        ids = encoded["input_ids"].to(self.chexbert.device)
+        mask = encoded["attention_mask"].to(self.chexbert.device)
         outputs = self.chexbert.model(ids, mask.float())
         # Native class IDs: 1 positive, 2 negative, 3 uncertain, 0 unmentioned.
         return torch.stack([head.argmax(-1).eq(1) for head in outputs], dim=1).cpu().numpy().astype(np.int8)
