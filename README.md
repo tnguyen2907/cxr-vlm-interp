@@ -22,6 +22,7 @@ manually, not tracked in Git.
 ```text
 process_data.py                  prepare the existing study-level split
 lora_sft.py                      train the two adapters only when requested
+report_sft.py                    train the text-first Findings-only adapter
 probing.py                       shared linear/MHA probing and yes/no evaluation
 report_generation.py             Findings generation with explicit resume
 evaluate_reports.py              independent RadGraph/CheXbert evaluation
@@ -327,14 +328,32 @@ single yes/no answer token using full-vocabulary cross-entropy. Adapter files
 and training logs are saved in the new run's `lora_sft/` folder. Existing adapters
 are not overwritten or retrained as part of this migration.
 
+Report-only SFT is a separate, fixed experiment. First use the benchmark below
+to choose a microbatch by throughput and longest-report capacity, then run:
+
+```bash
+python report_sft.py \
+  --microbatch 16 \
+  --output-root runs/report_sft_01
+```
+
+Replace `16` with the microbatch selected by the server benchmark.
+
+It trains from base `google/medgemma-4b-it`, never from a classification
+adapter. There is one text-first example per training study, using Findings
+only. All Findings tokens plus `<end_of_turn>` are supervised; image, prompt,
+and padding tokens are masked. The fixed settings are decoder-only rank-16
+LoRA, effective batch 64, one epoch, learning rate `1e-4`, cosine decay, and 3%
+warmup. Outputs are saved under
+`report_sft/text_first_adapter/{adapter files,processor files,train_log.csv}`.
+
 ## Report-Generation Transfer
 
-The report workflow is implemented locally; real-data/GPU benchmarks are still
-required before a full run. It compares original MedGemma with both existing
-classification adapters, each under image-first and text-first generation.
-The target is **Findings only**. Reuse the original test manifest and images;
-no classification retraining, retrieval, gold labels, or impression fallback.
-There are up to 5,000 eligible studies per condition, or 30,000 reports total.
+The first transfer experiment compared original MedGemma with both existing
+classification adapters under image-first and text-first generation. The next
+experiment adds one report-only text-first adapter while reusing those saved
+reports. The target is **Findings only**. Reuse the original test manifest and
+images; no retrieval, gold labels, or impression fallback.
 
 `report_generation.py` joins `report.csv` on `study_id`, reports missing/empty
 findings, and saves a matched cohort before inference. It defaults to batched
@@ -411,13 +430,17 @@ chooses its own active GPU batches. Default groups of 256 limit host image
 memory and save more frequently. A blocking call saves only after that group
 returns. Both modes keep the model loaded across groups.
 
-Report SFT uses 1,024 training studies, microbatches 4/8/16/32, effective batch
-64, rank-16 decoder LoRA, and LR 1e-4. It times three warm-up plus ten measured
-optimizer steps, stops the increasing batch sweep at OOM, and checks the
-selected batch with text-first prompts. Its loss supervises the complete
-reference Findings text and end-of-turn token, never the prompt/image/padding.
-This is a runtime/memory benchmark, not accuracy tuning or full training.
-Only its temporary trainer directory is deleted; existing adapters are untouched.
+Report SFT uses 1,024 seeded training studies, text-first prompts,
+microbatches 4/8/16/32, effective batch 64, rank-16 decoder LoRA, and LR 1e-4.
+It times three warm-up plus ten measured optimizer steps, stops the increasing
+batch sweep at OOM, and reports token-length percentiles, examples/sec,
+supervised tokens/sec, optimizer-step time, resource peaks, and a projected
+20,000-study epoch time. Candidates are ordered by throughput and tested on the
+longest training reports; the fastest one that passes is printed. Its loss
+supervises the complete reference Findings text and end-of-turn token, never
+the prompt/image/padding. This is capacity/runtime benchmarking, not accuracy
+tuning. Trial adapters and pixel caches are temporary; existing adapters are
+untouched.
 
 ### Generation, Evaluation, And Resume
 
@@ -444,6 +467,24 @@ conda activate cxr-vlm-interp
 python evaluate_reports.py --input-root runs/report_transfer_01 --output-root runs/report_transfer_eval_01
 ```
 
+After training the report-only adapter, generate only its text-first condition
+with the same engine and decoding settings used for the existing transfer run:
+
+```bash
+python report_generation.py \
+  --model custom \
+  --model-name report_only_text_first \
+  --checkpoint google/medgemma-4b-it \
+  --adapter-path runs/report_sft_01/report_sft/text_first_adapter \
+  --prompt-order text_first \
+  --engine vllm \
+  --output-root runs/report_only_generation_01
+
+python evaluate_reports.py \
+  --input-root runs/report_transfer_01 runs/report_only_generation_01 \
+  --output-root runs/report_sft_comparison_eval_01
+```
+
 Generation saves `report_generation/{cohort.csv,generations.csv,metadata.json}`
 and the run's `console.log`. Resume validates the same cohort/settings and skips
 saved `(model_name,prompt_order,study_id)` rows, including legitimate empty
@@ -451,7 +492,10 @@ generations. Completed runs exit before GPU loading. Writes replace temporary
 sibling files atomically. This does not keep an SSH job alive; use a persistent
 Slurm job or your usual terminal session management.
 
-Evaluation requires the complete requested cohort in every condition. It writes
+Each evaluation input root must be complete for its own requested conditions.
+Multiple roots must contain identical cohorts/reference Findings and no
+duplicate `(model_name, prompt_order, study_id)` keys. This allows existing
+base/classification reports to be reused when adding the report-only model. It writes
 `report_generation/{per_study_metrics.csv,metrics.csv,paired_differences.csv,`
 `generation_quality.csv,reference_annotations.json,evaluation_metadata.json,`
 `qualitative_review.csv}` beneath a **new evaluation run**. Re-score without
@@ -473,7 +517,6 @@ Set `REPORT_ROOT` to the evaluation run; no probing metrics or model inference
 are needed. It saves report tables and an F1 comparison figure under that run's
 `report_generation/visualization/`. Existing probing plots and paper stay intact.
 
-Full report-supervised training remains deferred until these transfer results
-are reviewed. Future checkpoint/epoch selection must use training-derived
-validation, not the held-out report cohort. Benchmarks supply runtime estimates;
-no H200 throughput or clinical benefit has yet been verified for this workflow.
+Mixed report/classification training remains future work. Future checkpoint,
+epoch, learning-rate, or joint-loss-weight selection must use training-derived
+patient-disjoint validation, not the held-out report cohort.

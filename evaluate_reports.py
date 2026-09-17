@@ -186,9 +186,48 @@ def summarize(frame, resamples=1000):
         "model_name", "prompt_order", "metric", "difference_vs_base", "ci_low", "ci_high"])
 
 
+def load_generation_runs(input_roots):
+    """Load complete generation runs and require one identical reference cohort."""
+    cohort = None
+    frames, metadata = [], []
+    for root in input_roots:
+        source = root / "report_generation"
+        current_metadata = json.loads((source / "metadata.json").read_text(encoding="utf-8"))
+        current_cohort = pd.read_csv(source / "cohort.csv", dtype=str, keep_default_na=False)
+        current = pd.read_csv(source / "generations.csv",
+                              dtype={c: str for c in COHORT_COLUMNS}, keep_default_na=False)
+        expected = {(spec["name"], order, study) for spec in current_metadata["settings"]["models"]
+                    for order in current_metadata["settings"]["orders"] for study in current_cohort.study_id}
+        keys = set(current[RESULT_KEY].itertuples(index=False, name=None))
+        if current.duplicated(RESULT_KEY).any() or keys != expected:
+            raise ValueError(f"Generation run is incomplete or duplicated: {root}")
+        for _, part in current.groupby(["model_name", "prompt_order"]):
+            wanted = current_cohort.set_index("study_id").loc[part.study_id].reset_index()
+            pd.testing.assert_frame_equal(part[COHORT_COLUMNS].reset_index(drop=True).astype(str),
+                                          wanted.astype(str))
+        if cohort is None:
+            cohort = current_cohort
+        else:
+            pd.testing.assert_frame_equal(
+                current_cohort.sort_values("study_id").reset_index(drop=True),
+                cohort.sort_values("study_id").reset_index(drop=True),
+                check_dtype=False,
+            )
+        frames.append(current)
+        metadata.append({"root": str(root), "settings": current_metadata["settings"]})
+
+    frame = pd.concat(frames, ignore_index=True)
+    if frame.duplicated(RESULT_KEY).any():
+        duplicates = frame.loc[frame.duplicated(RESULT_KEY, keep=False), RESULT_KEY]
+        raise ValueError("Generation roots contain duplicate model/order/study keys:\n" +
+                         duplicates.head().to_string(index=False))
+    return cohort, frame, metadata
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-root", type=resolve_path, required=True, help="Existing generation run")
+    parser.add_argument("--input-root", type=resolve_path, nargs="+", required=True,
+                        help="One or more complete generation runs")
     parser.add_argument("--output-root", type=resolve_path, required=True, help="Fresh evaluation run")
     parser.add_argument("--batch-size", type=int, default=EVAL_BATCH_SIZE)
     parser.add_argument("--bootstrap-samples", type=int, default=1000)
@@ -201,21 +240,11 @@ def main():
 
 
 def run(args):
-    source = args.input_root / "report_generation"
-    metadata = json.loads((source / "metadata.json").read_text(encoding="utf-8"))
-    cohort = pd.read_csv(source / "cohort.csv", dtype=str, keep_default_na=False)
-    frame = pd.read_csv(source / "generations.csv", dtype={c: str for c in COHORT_COLUMNS}, keep_default_na=False)
-    expected = {(spec["name"], order, study) for spec in metadata["settings"]["models"]
-                for order in metadata["settings"]["orders"] for study in cohort.study_id}
-    if frame.duplicated(RESULT_KEY).any() or set(frame[RESULT_KEY].itertuples(index=False, name=None)) != expected:
-        raise ValueError("Generation run is incomplete or duplicated. Resume generation before evaluation.")
-    for _, part in frame.groupby(["model_name", "prompt_order"]):
-        wanted = cohort.set_index("study_id").loc[part.study_id].reset_index()
-        pd.testing.assert_frame_equal(part[COHORT_COLUMNS].reset_index(drop=True).astype(str), wanted.astype(str))
+    cohort, frame, generation_runs = load_generation_runs(args.input_root)
     configure_runtime(require_gpu=args.device == "cuda")
     output = args.output_root / "report_generation"
     output.mkdir()
-    atomic_save({"generation_run": str(args.input_root), "versions": package_versions(),
+    atomic_save({"generation_runs": generation_runs, "versions": package_versions(),
                  "radgraph_model": "radgraph-xl", "reward_level": "partial",
                  "chexbert_positive_class": 1, "empty_generation": "RadGraph=0; all CheXbert positives=0",
                  "bootstrap_samples": args.bootstrap_samples, "bootstrap_unit": "subject_id", "seed": RANDOM_STATE},
