@@ -1,4 +1,4 @@
-"""Train a text-first, Findings-only decoder LoRA from base MedGemma."""
+"""Train text-first report-only or concatenated report/classification LoRA."""
 
 import argparse
 import gc
@@ -10,8 +10,9 @@ from peft import LoraConfig
 from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor, set_seed
 
 from experiment_utils import (
-    DATA_CSV, MEDGEMMA_MODEL_ID, MODEL_DTYPE, RANDOM_STATE, add_token_types,
-    configure_runtime, prepare_pixels, resolve_path, run_log,
+    DATA_CSV, MEDGEMMA_MODEL_ID, MODEL_DTYPE, RANDOM_STATE, TARGET_LABELS,
+    add_token_types, answer_token_ids, configure_runtime, prepare_pixels,
+    resolve_path, run_log, tokenize_prompts,
 )
 from report_generation import REPORT_CSV, read_cohort, report_prompt
 
@@ -23,6 +24,7 @@ LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
 DATALOADER_NUM_WORKERS = 4
 DECODER_LINEAR_NAMES = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
+OBJECTIVES = ["report", "concatenated"]
 
 
 def report_training_rows(cohort, processor, max_length):
@@ -48,6 +50,8 @@ def report_training_rows(cohort, processor, max_length):
         rows.append({
             "image_idx": image_idx,
             "study_id": row.study_id,
+            "task": "report",
+            "finding": "",
             "input_ids": full,
             "labels": [-100] * len(prefix) + full[len(prefix):],
         })
@@ -57,6 +61,57 @@ def report_training_rows(cohort, processor, max_length):
         raise ValueError("Every report-SFT row must contain exactly 256 image placeholders.")
     lengths = pd.Series([len(row["input_ids"]) for row in rows])
     print("text_first report lengths", lengths.describe(percentiles=[0.5, 0.9, 0.99]).to_dict())
+    return rows
+
+
+def add_classification_labels(cohort, manifest):
+    labels = pd.read_csv(manifest, dtype={"study_id": str})[["study_id", *TARGET_LABELS]]
+    if labels.study_id.duplicated().any():
+        raise ValueError("The manifest must contain one label row per study.")
+    cohort = cohort.merge(labels, on="study_id", how="left", validate="one_to_one", sort=False)
+    if cohort[TARGET_LABELS].isna().all(axis=1).any():
+        raise ValueError("Classification labels are missing for a report-training study.")
+    for label in TARGET_LABELS:
+        cohort[label] = pd.to_numeric(cohort[label], errors="coerce").eq(1).astype("int8")
+    return cohort.reset_index(drop=True)
+
+
+def classification_training_rows(cohort, processor, max_length):
+    """Build the existing text-first one-token yes/no classification examples."""
+    prompts = tokenize_prompts(processor)
+    yes_id, no_id = answer_token_ids(processor)
+    prefixes = {
+        label: prompts[("text_first", label)]["input_ids"][0].tolist()
+        for label in TARGET_LABELS
+    }
+    rows = []
+    for image_idx, row in cohort.iterrows():
+        for label in TARGET_LABELS:
+            answer = yes_id if row[label] == 1 else no_id
+            full = prefixes[label] + [answer]
+            if len(full) > max_length:
+                raise ValueError(f"Study {row.study_id} classification prompt exceeds context limit {max_length}.")
+            rows.append({
+                "image_idx": image_idx,
+                "study_id": row.study_id,
+                "task": "classification",
+                "finding": label,
+                "input_ids": full,
+                "labels": [-100] * (len(full) - 1) + [answer],
+            })
+
+    image_id = getattr(processor, "image_token_id", None)
+    if image_id is None or any(row["input_ids"].count(image_id) != 256 for row in rows):
+        raise ValueError("Every classification-SFT row must contain exactly 256 image placeholders.")
+    return rows
+
+
+def sft_training_rows(cohort, processor, max_length, objective):
+    rows = report_training_rows(cohort, processor, max_length)
+    if objective == "concatenated":
+        rows.extend(classification_training_rows(cohort, processor, max_length))
+    counts = pd.Series([row["task"] for row in rows]).value_counts().to_dict()
+    print(objective, "training rows", len(rows), counts)
     return rows
 
 
@@ -103,6 +158,7 @@ def main():
     parser.add_argument("--reports", type=resolve_path, default=REPORT_CSV)
     parser.add_argument("--output-root", type=resolve_path, required=True, help="Fresh runs/<run_name> folder")
     parser.add_argument("--microbatch", type=int, choices=[4, 8, 16, 32], required=True)
+    parser.add_argument("--objective", choices=OBJECTIVES, default="report")
     args = parser.parse_args()
     with run_log(args.output_root):
         run(args)
@@ -116,12 +172,14 @@ def run(args):
     cohort = read_cohort(args.manifest, args.reports, split="train")
     if len(cohort) != 20_000 or cohort.study_id.nunique() != 20_000:
         raise ValueError(f"Expected exactly 20,000 unique report-training studies, found {len(cohort)}.")
+    if args.objective == "concatenated":
+        cohort = add_classification_labels(cohort, args.manifest)
 
     processor = AutoProcessor.from_pretrained(MEDGEMMA_MODEL_ID)
     if processor.tokenizer.pad_token_id is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model_context = AutoConfig.from_pretrained(MEDGEMMA_MODEL_ID).text_config.max_position_embeddings
-    rows = report_training_rows(cohort, processor, model_context)
+    rows = sft_training_rows(cohort, processor, model_context, args.objective)
     pixels = prepare_pixels(cohort.image_path.tolist(), processor)
     collator = ReportCollator(processor, pixels)
     sample = collator(rows[:2])
@@ -138,7 +196,8 @@ def run(args):
           "gradient accumulation", EFFECTIVE_BATCH_SIZE // args.microbatch,
           "LoRA target modules", len(targets))
 
-    output_dir = args.output_root / "report_sft" / "text_first_adapter"
+    output_name = "report_sft" if args.objective == "report" else "concatenated_sft"
+    output_dir = args.output_root / output_name / "text_first_adapter"
     output_dir.mkdir(parents=True)
     trainer = SFTTrainer(
         model=model,

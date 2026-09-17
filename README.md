@@ -22,7 +22,7 @@ manually, not tracked in Git.
 ```text
 process_data.py                  prepare the existing study-level split
 lora_sft.py                      train the two adapters only when requested
-report_sft.py                    train the text-first Findings-only adapter
+report_sft.py                    train report-only or concatenated text-first adapters
 probing.py                       shared linear/MHA probing and yes/no evaluation
 report_generation.py             Findings generation with explicit resume
 evaluate_reports.py              independent RadGraph/CheXbert evaluation
@@ -328,16 +328,15 @@ single yes/no answer token using full-vocabulary cross-entropy. Adapter files
 and training logs are saved in the new run's `lora_sft/` folder. Existing adapters
 are not overwritten or retrained as part of this migration.
 
-Report-only SFT is a separate, fixed experiment. First use the benchmark below
-to choose a microbatch by throughput and longest-report capacity, then run:
+Report-only SFT is a separate, fixed experiment. The server benchmark selected
+microbatch 8 by throughput and longest-report capacity:
 
 ```bash
 python report_sft.py \
-  --microbatch 16 \
+  --objective report \
+  --microbatch 8 \
   --output-root runs/report_sft_01
 ```
-
-Replace `16` with the microbatch selected by the server benchmark.
 
 It trains from base `google/medgemma-4b-it`, never from a classification
 adapter. There is one text-first example per training study, using Findings
@@ -346,6 +345,21 @@ and padding tokens are masked. The fixed settings are decoder-only rank-16
 LoRA, effective batch 64, one epoch, learning rate `1e-4`, cosine decay, and 3%
 warmup. Outputs are saved under
 `report_sft/text_first_adapter/{adapter files,processor files,train_log.csv}`.
+
+The concatenated baseline uses the same trainer and frozen model components,
+but shuffles 20,000 report examples together with 100,000 text-first
+classification examples. Classification rows supervise only the existing
+single yes/no answer token. This ordinary mixed-dataset loss has implicit task
+weighting and is distinct from the deferred paired-loss objective.
+
+```bash
+python report_sft.py \
+  --objective concatenated \
+  --microbatch <selected_by_concatenated_benchmark> \
+  --output-root runs/concatenated_sft_01
+```
+
+Its adapter is saved under `concatenated_sft/text_first_adapter/`.
 
 ## Report-Generation Transfer
 
@@ -405,6 +419,7 @@ python temp/benchmark/benchmark_report_generation.py --stage correctness --engin
 python temp/benchmark/benchmark_report_generation.py --stage correctness --engine both --output-root runs/report_correctness_both_01
 python temp/benchmark/benchmark_report_generation.py --stage inference --engine both --output-root runs/report_inference_01
 python temp/benchmark/benchmark_report_generation.py --stage report_sft --output-root runs/report_sft_benchmark_01
+python temp/benchmark/benchmark_report_generation.py --stage report_sft --objective concatenated --output-root runs/concatenated_sft_benchmark_01
 ```
 
 Correctness covers eight training studies and all six model/order conditions.
